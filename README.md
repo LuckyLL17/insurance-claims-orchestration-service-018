@@ -13,6 +13,20 @@
 - 设备、车辆、人员、维修厂、账户的风险关联图
 - 调查任务租约、过期提交保护和重派
 - 单案件及跨案件风险解释
+- 监管时限与合规留痕：按地区/险种/渠道计算材料通知、首次决定、补偿支付、投诉响应等法定截止时间
+- 法定时钟区分工作日、节假日、暂停计时与重新起算，支持规则版本冻结与时区边界
+- 截止临近通知、逾期分级升级、案件级合规时间线与批量复核
+
+## 合规接口示例
+
+```bash
+curl http://localhost:4100/claims/<id>/compliance            # 全部法定时限及留痕
+curl http://localhost:4100/claims/<id>/compliance/timeline   # 案件级合规时间线
+curl -X POST http://localhost:4100/claims/<id>/compliance/scan -d '{"now":"2026-11-01T00:00:00Z"}' -H 'content-type: application/json'
+curl -X POST http://localhost:4100/claims/<id>/complaints -d '{"complaintId":"C-1"}' -H 'content-type: application/json'
+curl -X POST http://localhost:4100/compliance/review-batch -d '{"outcome":"waived","reason":"regulator-approved"}' -H 'content-type: application/json'
+curl 'http://localhost:4100/compliance/deadlines?status=breached'
+```
 
 ## 启动
 
@@ -37,7 +51,7 @@ curl -X POST http://localhost:4100/claims \
 
 ## 目录说明
 
-- `src/domain`：理赔领域模型、规则、账本、证据、风险图谱和任务租约
+- `src/domain`：理赔领域模型、规则、账本、证据、风险图谱、任务租约、法定时钟与监管时限规则
 - `src/application`：事件存储、案件编排、支付、风险、任务和重放用例
 - `src/infrastructure`：可替换的内存存储实现
 - `src/http`：无框架 HTTP 路由和 JSON API

@@ -4,21 +4,37 @@ import { PaymentService } from '../application/payment-service';
 import { RiskService } from '../application/risk-service';
 import { TaskService } from '../application/task-service';
 import { ReplayService } from '../application/replay-service';
+import { ComplianceService } from '../application/compliance-service';
 import { RuleEngine } from '../domain/rules';
 
-export interface AppContext { claims: ClaimService; payments: PaymentService; risks: RiskService; tasks: TaskService; replay: ReplayService; rules: RuleEngine; }
+export interface AppContext { claims: ClaimService; payments: PaymentService; risks: RiskService; tasks: TaskService; replay: ReplayService; rules: RuleEngine; compliance: ComplianceService; }
 const json = (res: ServerResponse, status: number, value: unknown) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value, (_k, v) => v instanceof Set ? [...v] : v)); };
 const body = async (req: IncomingMessage): Promise<any> => { let data = ''; for await (const chunk of req) data += chunk; return data ? JSON.parse(data) : {}; };
 const parts = (url: string) => url.split('?')[0].split('/').filter(Boolean);
+const query = (url: string) => Object.fromEntries(new URLSearchParams(url.split('?')[1] ?? ''));
 
 export async function route(req: IncomingMessage, res: ServerResponse, app: AppContext): Promise<void> {
   try {
     const method = req.method ?? 'GET'; const path = parts(req.url ?? '/'); const input = method === 'POST' ? await body(req) : {};
     if (method === 'GET' && path[0] === 'health') return json(res, 200, { ok: true, service: 'insurance-claims-orchestration', now: new Date().toISOString() });
     if (method === 'POST' && path[0] === 'claims' && path.length === 1) return json(res, 201, app.claims.create({ ...input, loss: { ...input.loss, gross: Number(input.loss.gross) } }, 'api', req.headers['idempotency-key'] as string));
+    if (path[0] === 'compliance') {
+      const q = query(req.url ?? '');
+      if (method === 'GET' && path[1] === 'deadlines') return json(res, 200, app.compliance.board(q.now ? new Date(q.now) : undefined, q.status));
+      if (method === 'POST' && path[1] === 'scan') return json(res, 200, app.compliance.scanAll(input.now ? new Date(input.now) : undefined));
+      if (method === 'POST' && path[1] === 'review-batch') return json(res, 200, app.compliance.reviewBatch(input, 'api', input.now ? new Date(input.now) : undefined));
+      return json(res, 404, { error: 'route not found' });
+    }
     if (path[0] !== 'claims' || !path[1]) return json(res, 404, { error: 'route not found' });
     const id = path[1];
     if (method === 'GET' && path.length === 2) return json(res, 200, app.claims.get(id));
+    if (method === 'GET' && path[2] === 'compliance' && path[3] === 'timeline') return json(res, 200, app.compliance.timeline(id, query(req.url ?? '').now ? new Date(query(req.url ?? '').now) : undefined));
+    if (method === 'GET' && path[2] === 'compliance') return json(res, 200, app.compliance.deadlines(id, query(req.url ?? '').now ? new Date(query(req.url ?? '').now) : undefined));
+    if (method === 'POST' && path[2] === 'compliance' && path[3] === 'scan') return json(res, 200, app.compliance.scan(id, input.now ? new Date(input.now) : undefined));
+    if (method === 'POST' && path[2] === 'compliance' && path[3] === 'pause') return json(res, 200, app.claims.addEvent(id, 'deadline.paused', input, 'api', req.headers['idempotency-key'] as string, input.occurredAt));
+    if (method === 'POST' && path[2] === 'compliance' && path[3] === 'resume') return json(res, 200, app.claims.addEvent(id, 'deadline.resumed', input, 'api', req.headers['idempotency-key'] as string, input.occurredAt));
+    if (method === 'POST' && path[2] === 'complaints' && path[3] === 'respond') return json(res, 200, app.claims.addEvent(id, 'complaint.responded', input, 'api', req.headers['idempotency-key'] as string, input.occurredAt));
+    if (method === 'POST' && path[2] === 'complaints') return json(res, 201, app.claims.addEvent(id, 'complaint.received', input, 'api', req.headers['idempotency-key'] as string, input.occurredAt));
     if (method === 'POST' && path[2] === 'evidence' && path[4] === 'review') return json(res, 200, app.claims.reviewEvidence(id, path[3], Boolean(input.accepted), 'api', req.headers['idempotency-key'] as string));
     if (method === 'POST' && path[2] === 'evidence') return json(res, 201, app.claims.addEvidence(id, input, 'api', req.headers['idempotency-key'] as string));
     if (method === 'POST' && path[2] === 'events') return json(res, 200, app.claims.addEvent(id, input.type, input.payload, input.actor ?? 'api', input.idempotencyKey, input.occurredAt));

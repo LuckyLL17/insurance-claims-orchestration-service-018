@@ -23,7 +23,14 @@ export type ClaimEventType =
   | 'payment.settled'
   | 'payment.reversed'
   | 'claim.reopened'
-  | 'claim.rejected';
+  | 'claim.rejected'
+  | 'complaint.received'
+  | 'complaint.responded'
+  | 'deadline.paused'
+  | 'deadline.resumed'
+  | 'deadline.notification'
+  | 'deadline.escalated'
+  | 'deadline.reviewed';
 
 export interface Participant { kind: 'person' | 'vehicle' | 'device' | 'repair_shop' | 'account'; id: string; role?: string; }
 export interface MonetaryAmount { currency: string; minor: number; }
@@ -42,6 +49,8 @@ export interface ClaimState {
   lossAt: string;
   reportedAt: string;
   channel: string;
+  region: string;
+  lineOfBusiness: string;
   participants: Participant[];
   loss: LossEstimate;
   policy?: PolicyVersion;
@@ -72,5 +81,6 @@ export interface DomainEvent<T = unknown> {
 
 export interface ClaimReportedPayload {
   policyId: string; lossAt: string; reportedAt: string; channel: string;
+  region?: string; lineOfBusiness?: string;
   participants: Participant[]; loss: LossEstimate;
 }
