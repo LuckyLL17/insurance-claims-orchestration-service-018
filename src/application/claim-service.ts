@@ -2,16 +2,22 @@ import { EventStore } from './event-store';
 import { EvidenceLedger } from '../domain/evidence';
 import { PolicyCatalog } from '../domain/policy';
 import { RuleEngine } from '../domain/rules';
+import { DeadlineRuleBook } from '../domain/deadline-rules';
 import { ClaimReportedPayload, ClaimState, DomainEvent, EvidenceRecord } from '../domain/types';
 import { newId, iso } from '../domain/ids';
 
 export class ClaimService {
-  constructor(private readonly events: EventStore, private readonly policies: PolicyCatalog, private readonly rules: RuleEngine, private readonly evidence: EvidenceLedger) {}
+  constructor(private readonly events: EventStore, private readonly policies: PolicyCatalog, private readonly rules: RuleEngine, private readonly evidence: EvidenceLedger, private readonly deadlineRules?: DeadlineRuleBook) {}
 
   create(input: ClaimReportedPayload, actor: string, key?: string): ClaimState {
     const id = newId('claim');
-    this.events.append(id, 'claim.reported', { ...input, lossAt: iso(input.lossAt), reportedAt: iso(input.reportedAt) }, actor, key);
+    const region = input.region ?? 'CN';
+    const line = input.line ?? 'auto';
+    this.events.append(id, 'claim.reported', { ...input, region, line, lossAt: iso(input.lossAt), reportedAt: iso(input.reportedAt) }, actor, key, input.reportedAt);
     this.events.append(id, 'policy.snapshot.created', { policy: this.policies.snapshot(input.policyId, input.lossAt), ruleSnapshot: this.rules.freeze() }, 'system', `policy:${id}`);
+    if (this.deadlineRules) {
+      this.events.append(id, 'compliance.snapshot.created', { region, line, channel: input.channel, snapshot: this.deadlineRules.freeze() }, 'system', `compliance:${id}`);
+    }
     return this.get(id);
   }
 
@@ -25,7 +31,9 @@ export class ClaimService {
     const claim = this.get(id); const record = this.evidence.review(evidenceId, accepted, claim.evidence); return this.addEvent(id, 'evidence.reviewed', { evidence: record }, actor, key);
   }
 
-  get(id: string): ClaimState { return this.replay(id, this.events.list(id)); }
+  get(id: string): ClaimState {
+    return this.replay(id, this.events.list(id));
+  }
   replay(id: string, events: DomainEvent[]): ClaimState {
     const state = this.empty(id);
     for (const event of events.sort((a, b) => a.sequence - b.sequence)) this.apply(state, event);
@@ -33,14 +41,15 @@ export class ClaimService {
     return state;
   }
 
-  private empty(id: string): ClaimState { return { id, policyId: '', status: 'reported', lossAt: '', reportedAt: '', channel: '', participants: [], loss: { currency: 'CNY', gross: 0 }, evidence: [], requiredEvidence: new Set(), completedSurveys: [], pendingDocuments: [], riskSignals: [], riskScore: 0, payments: [], approvedMinor: 0, audit: [], processedEventIds: new Set(), version: 0 }; }
+  private empty(id: string): ClaimState { return { id, policyId: '', status: 'reported', lossAt: '', reportedAt: '', channel: '', region: 'DEFAULT', line: 'auto', participants: [], loss: { currency: 'CNY', gross: 0 }, evidence: [], requiredEvidence: new Set(), completedSurveys: [], pendingDocuments: [], complaints: [], riskSignals: [], riskScore: 0, payments: [], approvedMinor: 0, audit: [], processedEventIds: new Set(), version: 0 }; }
   private assertExists(id: string): void { if (this.events.list(id).length === 0) throw new Error(`unknown claim ${id}`); }
 
   private apply(state: ClaimState, event: DomainEvent): void {
     if (state.processedEventIds.has(event.id)) return; state.processedEventIds.add(event.id); state.version = event.sequence;
     const payload = event.payload as any;
-    if (event.type === 'claim.reported') { state.policyId = payload.policyId; state.lossAt = payload.lossAt; state.reportedAt = payload.reportedAt; state.channel = payload.channel; state.participants = payload.participants; state.loss = payload.loss; state.status = 'reported'; }
+    if (event.type === 'claim.reported') { state.policyId = payload.policyId; state.lossAt = payload.lossAt; state.reportedAt = payload.reportedAt; state.channel = payload.channel; state.region = payload.region ?? state.region; state.line = payload.line ?? state.line; state.participants = payload.participants; state.loss = payload.loss; state.status = 'reported'; }
     if (event.type === 'policy.snapshot.created') { state.policy = payload.policy; state.ruleSnapshot = payload.ruleSnapshot; }
+    if (event.type === 'compliance.snapshot.created') { state.deadlineSnapshot = payload.snapshot; state.region = payload.region ?? state.region; state.line = payload.line ?? state.line; }
     if (event.type === 'evidence.added') { state.evidence = [...state.evidence.filter((e) => e.id !== payload.evidence.id), payload.evidence]; state.status = state.status === 'reported' ? 'investigating' : state.status; }
     if (event.type === 'evidence.reviewed') { state.evidence = state.evidence.map((e) => e.id === payload.evidence.id ? payload.evidence : e); }
     if (event.type === 'documents.requested') { state.pendingDocuments = [...new Set([...(state.pendingDocuments), ...(payload.kinds ?? [])])]; state.status = 'awaiting_documents'; }
@@ -51,6 +60,12 @@ export class ClaimService {
     if (event.type === 'payment.settled' || event.type === 'payment.reversed') { state.payments = [...state.payments, payload.payment]; state.status = payload.payment.kind === 'reversal' ? 'reopened' : 'partially_paid'; }
     if (event.type === 'claim.reopened') state.status = 'reopened';
     if (event.type === 'claim.rejected') state.status = 'rejected';
+    if (event.type === 'complaint.registered') state.complaints = [...state.complaints, { id: String(payload.complaintId ?? payload.id ?? `C${state.complaints.length + 1}`), registeredAt: event.occurredAt, source: String(payload.source ?? 'unknown') }];
+    if (event.type === 'complaint.responded') {
+      const target = state.complaints.find((c) => c.id === String(payload.complaintId ?? '')) ?? state.complaints.at(-1);
+      if (target) state.complaints = state.complaints.map((c) => (c.id === target.id ? { ...c, respondedAt: event.occurredAt } : c));
+    }
+    if (event.type === 'compliance.reviewed') { state.complianceReviewedAt = event.occurredAt; state.complianceReviewNote = payload.note; }
     state.audit.push({ sequence: event.sequence, eventId: event.id, type: event.type, occurredAt: event.occurredAt, actor: event.actor, summary: `${event.type} accepted` });
   }
 }
